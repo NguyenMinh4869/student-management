@@ -2,14 +2,8 @@ package com.example.pt3.ui.screens
 
 import android.Manifest
 import android.annotation.SuppressLint
+import android.content.Context
 import android.util.Log
-import android.webkit.ConsoleMessage
-import android.webkit.WebChromeClient
-import android.webkit.WebResourceError
-import android.webkit.WebResourceRequest
-import android.webkit.WebSettings
-import android.webkit.WebView
-import android.webkit.WebViewClient
 import android.widget.Toast
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
@@ -47,6 +41,11 @@ import com.example.pt3.util.searchTomTom
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
+import org.osmdroid.config.Configuration
+import org.osmdroid.tileprovider.tilesource.TileSourceFactory
+import org.osmdroid.util.GeoPoint
+import org.osmdroid.views.MapView
+import org.osmdroid.views.overlay.Marker
 
 @SuppressLint("SetJavaScriptEnabled")
 @OptIn(ExperimentalMaterial3Api::class)
@@ -274,7 +273,7 @@ fun SinhvienDetailScreen(navController: NavController, viewModel: MainViewModel,
                     Spacer(Modifier.height(20.dp))
                 }
 
-                // MAP SECTION (MAPBOX - FIXED VISIBILITY)
+                // MAP SECTION — native osmdroid MapView
                 if (sv!!.latitude != null && sv!!.longitude != null) {
                     Text(
                         "Vị trí trên bản đồ",
@@ -282,44 +281,9 @@ fun SinhvienDetailScreen(navController: NavController, viewModel: MainViewModel,
                         fontWeight = FontWeight.Bold,
                         color = MaterialTheme.colorScheme.primary
                     )
-                    
-                    val mapboxHtml = """
-                        <!DOCTYPE html>
-                        <html>
-                        <head>
-                            <meta charset="utf-8">
-                            <meta name="viewport" content="initial-scale=1,maximum-scale=1,user-scalable=no">
-                            <link href="https://api.mapbox.com/mapbox-gl-js/v3.1.2/mapbox-gl.css" rel="stylesheet">
-                            <script src="https://api.mapbox.com/mapbox-gl-js/v3.1.2/mapbox-gl.js"></script>
-                            <style>
-                                html, body { height: 100%; margin: 0; padding: 0; overflow: hidden; }
-                                #map { position: absolute; top: 0; bottom: 0; width: 100%; border-radius: 16px; background-color: #eee; }
-                            </style>
-                        </head>
-                        <body>
-                        <div id="map"></div>
-                        <script>
-                            try {
-                                mapboxgl.accessToken = 'pk.eyJ1IjoiaG9hbmdtaW5oNzEyMDA0IiwiYSI6ImNtZjV3aGg4bjA5OHoyaXBueXl4NTcxaTUifQ.IcNTYz1u1rKxdwNIT8edtA';
-                                const map = new mapboxgl.Map({
-                                    container: 'map',
-                                    style: 'mapbox://styles/mapbox/streets-v12',
-                                    center: [${sv!!.longitude}, ${sv!!.latitude}],
-                                    zoom: 14,
-                                    attributionControl: false
-                                });
-                                new mapboxgl.Marker({ color: '#f44336' })
-                                    .setLngLat([${sv!!.longitude}, ${sv!!.latitude}])
-                                    .addTo(map);
-                                map.addControl(new mapboxgl.NavigationControl(), 'top-right');
-                                console.log("Mapbox Render Success");
-                            } catch (e) {
-                                console.error("Mapbox JS Error: " + e.message);
-                            }
-                        </script>
-                        </body>
-                        </html>
-                    """.trimIndent()
+
+                    val lat = sv!!.latitude!!
+                    val lon = sv!!.longitude!!
 
                     Box(
                         modifier = Modifier
@@ -330,37 +294,47 @@ fun SinhvienDetailScreen(navController: NavController, viewModel: MainViewModel,
                     ) {
                         AndroidView(
                             factory = { ctx ->
-                                WebView(ctx).apply {
-                                    settings.apply {
-                                        javaScriptEnabled = true
-                                        domStorageEnabled = true
-                                        useWideViewPort = true
-                                        loadWithOverviewMode = true
-                                        mixedContentMode = WebSettings.MIXED_CONTENT_ALWAYS_ALLOW
+                                // CRITICAL: must initialise osmdroid config BEFORE creating MapView
+                                // Without a user-agent, OSM servers return HTTP 403 → blank tiles
+                                Configuration.getInstance().load(
+                                    ctx,
+                                    ctx.getSharedPreferences("osmdroid", Context.MODE_PRIVATE)
+                                )
+                                Configuration.getInstance().userAgentValue = ctx.packageName
+
+                                MapView(ctx).apply {
+                                    setTileSource(TileSourceFactory.MAPNIK)
+                                    setMultiTouchControls(true)
+                                    isClickable = true
+
+                                    val geoPoint = GeoPoint(lat, lon)
+                                    controller.setZoom(18.0)
+                                    controller.setCenter(geoPoint)
+
+                                    // Add a marker at the student's location
+                                    val marker = Marker(this).apply {
+                                        position = geoPoint
+                                        setAnchor(Marker.ANCHOR_CENTER, Marker.ANCHOR_BOTTOM)
+                                        title = "Vị trí sinh viên"
                                     }
-                                    
-                                    webChromeClient = object : WebChromeClient() {
-                                        override fun onConsoleMessage(cm: ConsoleMessage?): Boolean {
-                                            Log.d("MapboxDebug", "JS: " + cm?.message())
-                                            return true
-                                        }
-                                    }
-                                    
-                                    webViewClient = object : WebViewClient() {
-                                        override fun onReceivedError(v: WebView?, r: WebResourceRequest?, e: WebResourceError?) {
-                                            Log.e("MapboxDebug", "Network Error: " + e?.description)
-                                        }
-                                        override fun onPageFinished(view: WebView?, url: String?) {
-                                            Log.d("MapboxDebug", "Page Loaded: $url")
-                                        }
-                                    }
-                                    
-                                    loadDataWithBaseURL("https://api.mapbox.com", mapboxHtml, "text/html", "UTF-8", null)
+                                    overlays.add(marker)
+                                    invalidate()
                                 }
                             },
-                            update = { 
-                                Log.d("MapboxDebug", "Updating coordinates: ${sv!!.latitude}, ${sv!!.longitude}")
-                                it.loadDataWithBaseURL("https://api.mapbox.com", mapboxHtml, "text/html", "UTF-8", null) 
+                            update = { mapView ->
+                                // Re-center map if coordinates change
+                                val geoPoint = GeoPoint(lat, lon)
+                                mapView.controller.setZoom(18.0)
+                                mapView.controller.setCenter(geoPoint)
+                                // Refresh marker
+                                mapView.overlays.removeAll { it is Marker }
+                                val marker = Marker(mapView).apply {
+                                    position = geoPoint
+                                    setAnchor(Marker.ANCHOR_CENTER, Marker.ANCHOR_BOTTOM)
+                                    title = "Vị trí sinh viên"
+                                }
+                                mapView.overlays.add(marker)
+                                mapView.invalidate()
                             },
                             modifier = Modifier.fillMaxSize()
                         )

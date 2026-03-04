@@ -1,0 +1,116 @@
+# 🗺️ Map Rendering Diagnosis Report
+
+## How the Map is Implemented
+
+The map is **not** osmdroid and is **not** a native SDK. The approach is:
+
+1. A raw **Mapbox GL JS** HTML page is built as a Kotlin string directly inside [SinhvienDetailScreen.kt](file:///c:/QUOC%20DAT/STUDY/PRM392/student-management/app/src/main/java/com/example/pt3/ui/screens/SinhvienDetailScreen.kt).
+2. That HTML is rendered inside an Android **`WebView`** via `AndroidView` (Jetpack Compose interop).
+3. The page loads the Mapbox JS + CSS from CDN, creates a `mapboxgl.Map`, and drops a red marker at the student's coordinates.
+
+---
+
+## 🐛 Root Cause: `loadDataWithBaseURL` + Mapbox Security
+
+> [!CAUTION]
+> This is the primary bug causing the **blank white map**.
+
+**The broken line (line 358 & 363, [SinhvienDetailScreen.kt](file:///c:/QUOC%20DAT/STUDY/PRM392/student-management/app/src/main/java/com/example/pt3/ui/screens/SinhvienDetailScreen.kt)):**
+```kotlin
+loadDataWithBaseURL("https://api.mapbox.com", mapboxHtml, "text/html", "UTF-8", null)
+```
+
+**Why this causes a blank map:**
+
+Mapbox GL JS fetches its **vector tile resources** (`mapbox://styles/mapbox/streets-v12`, glyphs, sprites) from `https://api.mapbox.com`. When `loadDataWithBaseURL` sets the base URL to `https://api.mapbox.com`, the WebView treats the page as if it *is* that domain. Mapbox's internal JS then makes additional XHR/fetch calls that **fail due to WebView security restrictions on cross-origin network requests from data-loaded content**, and the tile worker threads silently die — leaving the container visible (explaining the visible zoom controls `+/-`) but tiles completely blank.
+
+**The fix:** Load the HTML using `null` as the base URL (or `about:blank`) and let Mapbox GL JS handle its own network requests normally. The WebView's `INTERNET` permission already allows this.
+
+```kotlin
+// BEFORE (broken):
+loadDataWithBaseURL("https://api.mapbox.com", mapboxHtml, "text/html", "UTF-8", null)
+
+// AFTER (fixed):
+loadDataWithBaseURL(null, mapboxHtml, "text/html", "UTF-8", null)
+```
+
+Apply this fix in **both** the `factory` block (line 358) and the `update` block (line 363).
+
+---
+
+## ⚠️ Secondary Issue: Missing `ACCESS_NETWORK_STATE` Permission
+
+> [!WARNING]
+> Some network libraries and WebView internals check for this permission.
+
+**[AndroidManifest.xml](file:///c:/QUOC%20DAT/STUDY/PRM392/student-management/app/src/main/AndroidManifest.xml)** currently has:
+```xml
+<uses-permission android:name="android.permission.INTERNET" />
+<!-- ✅ Present -->
+<!-- ❌ Missing: ACCESS_NETWORK_STATE -->
+```
+
+Add after line 6 of [AndroidManifest.xml](file:///c:/QUOC%20DAT/STUDY/PRM392/student-management/app/src/main/AndroidManifest.xml):
+```xml
+<uses-permission android:name="android.permission.ACCESS_NETWORK_STATE" />
+```
+
+---
+
+## ✅ Checklist: All Issues vs. Your Original Questions
+
+| Check | Status | Notes |
+|---|---|---|
+| `INTERNET` permission | ✅ Present | Line 6 of manifest |
+| `ACCESS_NETWORK_STATE` | ❌ Missing | Add to manifest |
+| osmdroid User-Agent | ✅ N/A | Project uses Mapbox GL JS, not osmdroid |
+| Tile source configured | ✅ Yes | `mapbox://styles/mapbox/streets-v12` |
+| `mapView.onResume/onPause` | ✅ N/A | WebView lifecyle is managed automatically by `AndroidView` |
+| **`loadDataWithBaseURL` base URL** | ❌ **ROOT CAUSE** | Must be `null`, not `"https://api.mapbox.com"` |
+
+---
+
+## 📋 Complete Fixed Code Block
+
+Replace the entire `AndroidView` block in [SinhvienDetailScreen.kt](file:///c:/QUOC%20DAT/STUDY/PRM392/student-management/app/src/main/java/com/example/pt3/ui/screens/SinhvienDetailScreen.kt) (~lines 331–366):
+
+```kotlin
+AndroidView(
+    factory = { ctx ->
+        WebView(ctx).apply {
+            settings.apply {
+                javaScriptEnabled = true
+                domStorageEnabled = true
+                useWideViewPort = true
+                loadWithOverviewMode = true
+                mixedContentMode = WebSettings.MIXED_CONTENT_ALWAYS_ALLOW
+            }
+
+            webChromeClient = object : WebChromeClient() {
+                override fun onConsoleMessage(cm: ConsoleMessage?): Boolean {
+                    Log.d("MapboxDebug", "JS: " + cm?.message())
+                    return true
+                }
+            }
+
+            webViewClient = object : WebViewClient() {
+                override fun onReceivedError(v: WebView?, r: WebResourceRequest?, e: WebResourceError?) {
+                    Log.e("MapboxDebug", "Network Error: " + e?.description)
+                }
+                override fun onPageFinished(view: WebView?, url: String?) {
+                    Log.d("MapboxDebug", "Page Loaded: $url")
+                }
+            }
+
+            // ✅ FIX: Use null as base URL, not "https://api.mapbox.com"
+            loadDataWithBaseURL(null, mapboxHtml, "text/html", "UTF-8", null)
+        }
+    },
+    update = {
+        Log.d("MapboxDebug", "Updating coordinates: ${sv!!.latitude}, ${sv!!.longitude}")
+        // ✅ FIX: Use null as base URL here too
+        it.loadDataWithBaseURL(null, mapboxHtml, "text/html", "UTF-8", null)
+    },
+    modifier = Modifier.fillMaxSize()
+)
+```

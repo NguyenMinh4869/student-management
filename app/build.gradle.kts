@@ -60,6 +60,9 @@ dependencies {
     implementation(libs.supabase.storage)
     implementation(libs.ktor.client.android)
 
+    // osmdroid — native Android map rendering with OpenStreetMap tiles
+    implementation("org.osmdroid:osmdroid-android:6.1.18")
+
     testImplementation(libs.junit)
     androidTestImplementation(libs.androidx.junit)
     androidTestImplementation(libs.androidx.espresso.core)
